@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Category, Product, Post, Comment, Expert
+from .models import Category, Product, Post, Comment, Expert, Question, Answer, CheckList
 
 # Register your models here.
 
@@ -21,3 +21,9 @@ admin.site.register(Post)
 admin.site.register(Comment)
 
 admin.site.register(Expert)
+
+admin.site.register(Question)
+
+admin.site.register(Answer)
+
+admin.site.register(CheckList)

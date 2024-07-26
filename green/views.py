@@ -1,9 +1,11 @@
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.models import User
 from django.contrib.auth.decorators import login_required
-from .models import Category, Product, Post, Comment, Expert, Reservation, UserProfile, Payment
-from .forms import PostForm, CommentForm
+from .models import Category, Product, Post, Comment, Expert, Reservation, UserProfile, Payment, Question, Answer, CheckList
+from .forms import PostForm, CommentForm, TestForm
 from django.utils import timezone
+from datetime import date, datetime, timedelta
+from django.db.models import Count
 
 # Create your views here.
 
@@ -256,3 +258,180 @@ def authored_posts(request):
 def reservation_list(request):
     reservations = Reservation.objects.filter(user=request.user)
     return render(request, 'green/reservation_list.html', {'reservations': reservations})
+
+@login_required
+def test_view(request):
+    today = timezone.now().date()
+    one_week_ago = today - timedelta(days=7)
+    user = request.user
+
+    if Answer.objects.filter(user=user, date__gte=one_week_ago).exists():
+        return redirect('green:result')
+
+    questions = Question.objects.all()
+
+    if request.method == 'POST':
+        form = TestForm(request.POST)
+        if form.is_valid():
+            for question in questions:
+                score = form.cleaned_data.get(f'question_{question.id}')
+                Answer.objects.create(
+                    user=request.user,
+                    question=question,
+                    score=score,
+                )
+            return redirect('green:result')
+    else:
+        form = TestForm()
+
+    context = {
+        'form': form,
+    }
+    return render(request, 'green/test.html', context)
+
+@login_required
+def result_view(request):
+    answers = Answer.objects.filter(user=request.user).order_by('-timestamp')[:10]
+    
+    scores = {answer.question.id: answer.score for answer in answers}
+    total_score = sum(int(score) for score in scores.values())
+
+    to_do_answers = sorted(answers, key=lambda x: x.score)[:5]
+    to_do_list = [ answer.question.to_do for answer in to_do_answers ]
+
+    context = {
+        'scores': scores,
+        'total_score': total_score,
+        'to_do_list' : to_do_list,
+    }
+
+    return render(request, 'green/result.html', context)
+
+def detail_result_view(request):
+    answers = Answer.objects.filter(user=request.user).order_by('-timestamp')[:10]
+
+    result = []
+    for answer in answers:
+        question = answer.question
+        result.append({
+            'question': question.question,
+            'score': answer.score,
+            'tip': question.tip,
+        })
+
+    context = {
+        'result': result,
+    }
+    return render(request, 'green/detail_result.html', context)
+
+
+@login_required
+def analysis_view(request):
+    try:
+        user_profile = UserProfile.objects.get(user=request.user)
+        if not user_profile.is_premium:
+            return redirect('green:premium_info')
+    except UserProfile.DoesNotExist:
+        return redirect('green:premium_info')
+    
+    answers = Answer.objects.filter(user=request.user).order_by('-timestamp')[:10]
+    to_do_answers = sorted(answers, key=lambda x: x.score)[:5]
+    to_do_list = [ answer.question.to_do for answer in to_do_answers ]
+
+    context = {
+        'answers': answers,
+        'to_do_list': to_do_list,
+    }
+
+    return render(request, 'green/analysis.html', context)
+
+@login_required
+def detail_analysis_view(request):
+    try:
+        user_profile = UserProfile.objects.get(user=request.user)
+        if not user_profile.is_premium:
+            return redirect('green:premium_info')
+    except UserProfile.DoesNotExist:
+        return redirect('green:premium_info')
+    
+    latest_answers = Answer.objects.filter(user=request.user).order_by('-timestamp')[:10]
+    second_answers = Answer.objects.filter(user=request.user).order_by('-timestamp')[10:20]
+    third_answers = Answer.objects.filter(user=request.user).order_by('-timestamp')[20:30]
+
+    context = {
+        'latest_answers': latest_answers,
+        'second_answers': second_answers,
+        'third_answers': third_answers,
+    }
+
+    return render(request, 'green/detail_analysis.html', context)
+
+
+@login_required
+def list_view(request):
+    # 투두 리스트 항목
+    latest_answers = Answer.objects.filter(user=request.user).order_by('-timestamp')[:10]
+    answers = sorted(latest_answers, key=lambda x: x.score)[:5]
+
+    to_do_list = [ answer.question for answer in answers ]
+
+    # 체크 리스트
+    if request.method == 'POST':
+        CheckList.objects.filter(user=request.user, date=timezone.now().date()).delete()
+
+        for question in to_do_list:
+            complete = request.POST.get(f'to_do_{question.id}', '0') == '1'
+            if complete:
+                CheckList.objects.create(
+                    user=request.user,
+                    question=question,
+                    date=timezone.now().date(),
+                    complete=True
+                )
+        return redirect('green:to_do_list')
+
+    check_list = CheckList.objects.filter(user=request.user, date=timezone.now().date())
+    completed_list = {list.question.id: list.complete for list in check_list}
+
+    # 일주일 리포트
+    today = timezone.now().date()
+    sunday = today - timedelta(days=today.weekday())
+    saturday = sunday + timedelta(days=6)
+
+    weekly_completion = CheckList.objects.filter(
+        user=request.user,
+        date__range = [sunday, saturday]
+    ).values('date').annotate(completed_count=Count('id')).order_by('date')
+
+    week = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+    completion_by_day = {day: 0 for day in week}
+    for record in weekly_completion:
+        day_of_week = (record['date'] - sunday).days  # 0(일요일) ~ 6(토요일)
+        completion_by_day[week[day_of_week]] = record['completed_count']
+
+    # 올해 리포트
+    year = today.year
+    january = timezone.datetime(year=year, month=1, day=1).date()
+    december = timezone.datetime(year=year, month=12, day=31).date()
+
+    monthly_completion = CheckList.objects.filter(
+        user=request.user,
+        date__range=[january, december]
+    ).values('date__year', 'date__month').annotate(completed_count=Count('id')).order_by('date__year', 'date__month')
+
+    months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    completion_by_month = {month: 0 for month in months}
+    for record in monthly_completion:
+        month_num = record['date__month'] - 1
+        month = months[month_num]     
+        completion_by_month[month] = record['completed_count']
+
+    context = {
+        'to_do_list': to_do_list,
+        'completed_list': completed_list,
+        'completion_by_day': completion_by_day,
+        'completion_by_month': completion_by_month,
+        'today': today,
+    }
+
+    return render(request, 'green/list.html', context)
